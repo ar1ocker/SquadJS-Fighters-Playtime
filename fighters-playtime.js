@@ -32,7 +32,7 @@ export default class FightersPlaytime extends BasePlugin {
       commands_to_show_squadmates_playtimes: {
         required: false,
         description: "The list of commands to show playtime of squadmates",
-        default: ["sm", "squadmates", "товарищи", "бойцы"],
+        default: ["sm", "squadmates", "товарищи", "бойцы", "см"],
       },
       show_playtime_of_new_fighters_to_squad_leader: {
         required: false,
@@ -134,7 +134,7 @@ export default class FightersPlaytime extends BasePlugin {
       return;
     }
 
-    this.showPlaytimeOfPlayerToPlayer(squadPlayer, leader);
+    this.showPlaytimeOfPlayerToPlayer(squadPlayer, leader, false, 1);
   }
 
   async showPlaytimeOfSquadLeader(squadPlayer) {
