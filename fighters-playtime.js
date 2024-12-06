@@ -58,6 +58,7 @@ export default class FightersPlaytime extends BasePlugin {
     this.showPlaytimeOfAllSquadLeaders = this.showPlaytimeOfAllSquadLeaders.bind(this);
     this.showPlaytimeOfSquadmates = this.showPlaytimeOfSquadmates.bind(this);
     this.showPlaytimeOfSpecificSquadLeader = this.showPlaytimeOfSpecificSquadLeader.bind(this);
+    this.showPlaytimeOfSquadToPlayer = this.showPlaytimeOfSquadToPlayer.bind(this);
     this.warn = this.warn.bind(this);
   }
 
@@ -93,14 +94,14 @@ export default class FightersPlaytime extends BasePlugin {
           await this.showPlaytimeOfAllSquadLeaders(data.player);
         }
       });
+    }
 
-      for (const command of this.options.commands_to_show_squadmates_playtimes) {
-        this.server.on(`CHAT_COMMAND:${command}`, async (data) => {
-          if (data?.player?.squadID) {
-            await this.showPlaytimeOfSquadmates(data.player);
-          }
-        });
-      }
+    for (const command of this.options.commands_to_show_squadmates_playtimes) {
+      this.server.on(`CHAT_COMMAND:${command}`, (data) => {
+        if (data?.player?.squadID) {
+          this.showPlaytimeOfSquadmates(data.player);
+        }
+      });
     }
   }
 
@@ -125,8 +126,30 @@ export default class FightersPlaytime extends BasePlugin {
     }
   }
 
+  async showPlaytimeOfSquadToPlayer(leader, toPlayer, repeat = 2) {
+    let squadMatesPlaytime = 0;
+
+    for (const player of this.server.players) {
+      if (player.teamID === leader.teamID && player.squadID === leader.squadID) {
+        if (!player.isLeader) {
+          const playtimeObj = await this.steam_api.getPlaytimeByGame(player.steamID, SQUAD_GAME_ID);
+          if (playtimeObj.playtime !== TIME_IS_UNKNOWN) {
+            squadMatesPlaytime += playtimeObj.playtime;
+          }
+        }
+      }
+    }
+
+    const leaderPlaytime = await this.steam_api.getPlaytimeByGame(leader.steamID, SQUAD_GAME_ID);
+
+    await this.warn(
+      toPlayer.steamID,
+      `Отряд №${leader.squadID}:\nСквадной ${leader.name} - ${leaderPlaytime.playtime !== TIME_IS_UNKNOWN ? leaderPlaytime.playtime.toFixed(0) : "неизвестное количество"} часов\nПехота - суммарно ${squadMatesPlaytime.toFixed(0)} часов`
+    );
+  }
+
   async showPlaytimeToSquadLeader(squadPlayer) {
-    let leader = await this.server.players.find(
+    let leader = this.server.players.find(
       (player) => player.isLeader && player.squadID === squadPlayer.squadID && player.teamID === squadPlayer.teamID
     );
 
@@ -134,11 +157,11 @@ export default class FightersPlaytime extends BasePlugin {
       return;
     }
 
-    this.showPlaytimeOfPlayerToPlayer(squadPlayer, leader, false, 1);
+    this.showPlaytimeOfPlayerToPlayer(squadPlayer, leader, true, 1);
   }
 
   async showPlaytimeOfSquadLeader(squadPlayer) {
-    let leader = await this.server.players.find(
+    let leader = this.server.players.find(
       (player) => player.isLeader && player.squadID === squadPlayer.squadID && player.teamID === squadPlayer.teamID
     );
 
@@ -150,18 +173,16 @@ export default class FightersPlaytime extends BasePlugin {
   }
 
   async showPlaytimeOfAllSquadLeaders(squadPlayer) {
-    let squadLeaders = await this.server.players.filter(
-      (player) => player.isLeader && player.teamID === squadPlayer.teamID
-    );
+    let squadLeaders = this.server.players.filter((player) => player.isLeader && player.teamID === squadPlayer.teamID);
 
     for (const leader of squadLeaders) {
-      await this.showPlaytimeOfPlayerToPlayer(leader, squadPlayer, true, 1);
+      await this.showPlaytimeOfSquadToPlayer(leader, squadPlayer, true, 1);
       await new Promise((resolve) => setTimeout(resolve, 2 * 1000));
     }
   }
 
   async showPlaytimeOfSpecificSquadLeader(squadPlayer, squadID) {
-    let squadLeader = await this.server.players.find(
+    let squadLeader = this.server.players.find(
       (player) => player.isLeader && player.teamID === squadPlayer.teamID && player.squadID === squadID
     );
 
@@ -170,11 +191,11 @@ export default class FightersPlaytime extends BasePlugin {
       return;
     }
 
-    await this.showPlaytimeOfPlayerToPlayer(squadLeader, squadPlayer, true, 2);
+    await this.showPlaytimeOfSquadToPlayer(squadLeader, squadPlayer, true, 2);
   }
 
   async showPlaytimeOfSquadmates(squadPlayer) {
-    let squadMates = await this.server.players.filter(
+    let squadMates = this.server.players.filter(
       (player) => player.teamID === squadPlayer.teamID && player.squadID === squadPlayer.squadID
     );
 
