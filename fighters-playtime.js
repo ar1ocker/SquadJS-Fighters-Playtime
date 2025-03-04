@@ -248,28 +248,27 @@ export default class FightersPlaytime extends BasePlugin {
    *
    * @param {string} steamID
    * @param {*} isNeedUpdate
-   * @returns
+   * @returns {Promise<number | TIME_IS_UNKNOWN>}
    */
   async getPlayerPlaytime(steamID, isNeedUpdate = false) {
-    let playtime;
     try {
-      playtime = await this.playtimeAPI.requestPlaytimeBySteamID(steamID, isNeedUpdate);
+      const playtime = await this.playtimeAPI.getPlayerMaxSecondsPlaytime(steamID, isNeedUpdate);
+      if (playtime === TIME_IS_UNKNOWN) {
+        return playtime;
+      }
+
+      return playtime / 60 / 60;
     } catch (error) {
       this.verbose(1, `Failed to get playtime for ${steamID} with error: ${error}`);
       return TIME_IS_UNKNOWN;
     }
-
-    if (playtime.bmPlaytime || playtime.steamPlaytime) {
-      return Math.max(playtime.bmPlaytime, playtime.steamPlaytime) / 60 / 60;
-    }
-
-    return TIME_IS_UNKNOWN;
   }
 
   /**
    *
    * @param {Array<string>} steamIDs
    * @param {boolean} isNeedUpdate
+   * @returns {Promise<number | TIME_IS_UNKNOWN>}
    */
   async getPlayersTotalPlaytime(steamIDs, isNeedUpdate = false) {
     if (steamIDs.length === 0) {
@@ -277,33 +276,8 @@ export default class FightersPlaytime extends BasePlugin {
       return TIME_IS_UNKNOWN;
     }
 
-    let playtimes = await this.getPlayersPlaytimes(steamIDs, isNeedUpdate);
-
-    if (playtimes === null) {
-      return TIME_IS_UNKNOWN;
-    }
-
-    let totalPlaytime = 0;
-    for (const playtime of playtimes) {
-      totalPlaytime += Math.max(playtime.bmPlaytime || playtime.steamPlaytime) / 60 / 60;
-    }
-
-    return totalPlaytime;
-  }
-
-  /**
-   *
-   * @param {Array<string>} steamIDs
-   * @param {boolean} isNeedUpdate
-   */
-  async getPlayersPlaytimes(steamIDs, isNeedUpdate = false) {
-    if (steamIDs.length === 0) {
-      this.verbose("WARNING: steamIDs length in getPlayersPlaytimes === 0");
-      return TIME_IS_UNKNOWN;
-    }
-
     try {
-      return await this.playtimeAPI.requestPlaytimesBySteamIDs(steamIDs, isNeedUpdate);
+      return (await this.playtimeAPI.getPlayersTotalSecondsPlaytime(steamIDs, isNeedUpdate)) / 60 / 60;
     } catch (error) {
       this.verbose(1, `Failed to get playtimes for ${steamIDs.length} steam ids with error: ${error}`);
       return TIME_IS_UNKNOWN;
