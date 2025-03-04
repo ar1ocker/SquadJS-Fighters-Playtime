@@ -1,5 +1,6 @@
+//@ts-check
 import BasePlugin from "./base-plugin.js";
-import { default as PlaytimeSearcher, TIME_IS_UNKNOWN } from "./playtime-searcher.js";
+import { default as PlaytimeServiceAPI, TIME_IS_UNKNOWN } from "./playtime-service-api.js";
 
 const SQUAD_GAME_ID = 393380;
 
@@ -14,9 +15,14 @@ export default class FightersPlaytime extends BasePlugin {
 
   static get optionsSpecification() {
     return {
-      steam_key: {
+      playtime_service_api_url: {
         required: true,
-        description: "The steam api key",
+        description: "URL to Playtime Service API",
+        default: "",
+      },
+      playtime_service_api_secret_key: {
+        required: true,
+        description: "Secret key for Playtime Service API",
         default: "",
       },
       commands_to_show_my_squad_leader_playtime: {
@@ -44,17 +50,27 @@ export default class FightersPlaytime extends BasePlugin {
         description: "Whether to show playtime of squad leader to fighter on join to squad",
         default: true,
       },
+      timeout_before_show_playtime_to_leader: {
+        required: false,
+        description: "How long after the start of the match should the time of the incoming players be shown?",
+        default: 220,
+      },
     };
   }
 
   constructor(server, options, connectors) {
     super(server, options, connectors);
 
-    this.steam_api = new PlaytimeSearcher(this.options.steam_key);
+    this.playtimeAPI = new PlaytimeServiceAPI(
+      this.options.playtime_service_api_url,
+      this.options.playtime_service_api_secret_key,
+      SQUAD_GAME_ID
+    );
+
+    this.lastGameDate = 0;
 
     this.showPlaytimeToSquadLeader = this.showPlaytimeToSquadLeader.bind(this);
     this.showPlaytimeOfPlayerToPlayer = this.showPlaytimeOfPlayerToPlayer.bind(this);
-    this.showPlaytimeOfSquadLeader = this.showPlaytimeOfSquadLeader.bind(this);
     this.showPlaytimeOfAllSquadLeaders = this.showPlaytimeOfAllSquadLeaders.bind(this);
     this.showPlaytimeOfSquadmates = this.showPlaytimeOfSquadmates.bind(this);
     this.showPlaytimeOfSpecificSquadLeader = this.showPlaytimeOfSpecificSquadLeader.bind(this);
@@ -65,12 +81,15 @@ export default class FightersPlaytime extends BasePlugin {
   async mount() {
     this.server.on("PLAYER_SQUAD_CHANGE", async (data) => {
       if (data.player.squadID && !data.player.isLeader) {
-        if (this.options.show_playtime_of_new_fighters_to_squad_leader) {
+        if (
+          this.options.show_playtime_of_new_fighters_to_squad_leader &&
+          this.getSecondsFromLastMatch() > this.options.timeout_before_show_playtime_to_leader
+        ) {
           await this.showPlaytimeToSquadLeader(data.player);
         }
 
         if (this.options.show_playtime_of_squad_leader_to_new_fighter) {
-          await this.showPlaytimeOfSquadLeader(data.player);
+          await this.showPlaytimeOfSpecificSquadLeader(data.player, data.player.squadID);
         }
       }
     });
@@ -78,12 +97,13 @@ export default class FightersPlaytime extends BasePlugin {
     for (const command of this.options.commands_to_show_my_squad_leader_playtime) {
       this.server.on(`CHAT_COMMAND:${command}`, async (data) => {
         let squadID = parseInt(data.message);
-        if (data?.player && squadID) {
+        if (data.player && squadID) {
           await this.showPlaytimeOfSpecificSquadLeader(data.player, squadID);
           return;
         }
-        if (data?.player?.squadID) {
-          await this.showPlaytimeOfSquadLeader(data.player);
+
+        if (data.player?.squadID) {
+          await this.showPlaytimeOfSpecificSquadLeader(data.player, data.player.squadID);
         }
       });
     }
@@ -103,12 +123,23 @@ export default class FightersPlaytime extends BasePlugin {
         }
       });
     }
+
+    this.server.on("NEW_GAME", () => (this.lastGameDate = Date.now()));
   }
 
+  /**
+   * Показывает количество часов определенного отдельного игрока
+   *
+   * @param {*} showPlayer
+   * @param {*} toPlayer
+   * @param {*} whetherToShowUnknown
+   * @param {number} repeat
+   * @returns
+   */
   async showPlaytimeOfPlayerToPlayer(showPlayer, toPlayer, whetherToShowUnknown = false, repeat = 2) {
-    let playtimeObj = await this.steam_api.getPlaytimeByGame(showPlayer.steamID, SQUAD_GAME_ID);
+    let playtime = await this.getPlayerPlaytime(showPlayer.steamID);
 
-    if (playtimeObj.playtime === TIME_IS_UNKNOWN) {
+    if (playtime === TIME_IS_UNKNOWN) {
       if (whetherToShowUnknown) {
         await this.warn(toPlayer.steamID, `Время ${showPlayer.name} - неизвестно`);
       }
@@ -116,38 +147,45 @@ export default class FightersPlaytime extends BasePlugin {
     }
 
     if (showPlayer.isLeader) {
-      await this.warn(
-        toPlayer.steamID,
-        `У сквадного ${showPlayer.name} - ${playtimeObj.playtime.toFixed(0)} часов`,
-        repeat
-      );
+      await this.warn(toPlayer.steamID, `У сквадного ${showPlayer.name} - ${playtime.toFixed(0)} часов`, repeat);
     } else {
-      await this.warn(toPlayer.steamID, `У ${showPlayer.name} - ${playtimeObj.playtime.toFixed(0)} часов`, repeat);
+      await this.warn(toPlayer.steamID, `У ${showPlayer.name} - ${playtime.toFixed(0)} часов`, repeat);
     }
   }
 
+  /**
+   * Показывает количество часов определенного сквадного и его бойцов
+   *
+   * @param {*} leader
+   * @param {*} toPlayer
+   * @param {number} repeat
+   */
   async showPlaytimeOfSquadToPlayer(leader, toPlayer, repeat = 2) {
-    let squadMatesPlaytime = 0;
+    let squadMates = this.server.players.filter(
+      (player) => player.teamID === leader.teamID && player.squadID === leader.squadID && !player.isLeader
+    );
 
-    for (const player of this.server.players) {
-      if (player.teamID === leader.teamID && player.squadID === leader.squadID) {
-        if (!player.isLeader) {
-          const playtimeObj = await this.steam_api.getPlaytimeByGame(player.steamID, SQUAD_GAME_ID);
-          if (playtimeObj.playtime !== TIME_IS_UNKNOWN) {
-            squadMatesPlaytime += playtimeObj.playtime;
-          }
-        }
-      }
+    let squadMatesText = "";
+    if (squadMates.length > 0) {
+      const squadMatesPlaytime = await this.getPlayersTotalPlaytime(squadMates.map((player) => player.steamID));
+      squadMatesText = `\nПехота - суммарно ${squadMatesPlaytime !== TIME_IS_UNKNOWN ? squadMatesPlaytime.toFixed(0) : "неизвестное количество"} часов`;
     }
 
-    const leaderPlaytime = await this.steam_api.getPlaytimeByGame(leader.steamID, SQUAD_GAME_ID);
+    const leaderPlaytime = await this.getPlayerPlaytime(leader.steamID);
 
     await this.warn(
       toPlayer.steamID,
-      `Отряд №${leader.squadID}:\nСквадной ${leader.name} - ${leaderPlaytime.playtime !== TIME_IS_UNKNOWN ? leaderPlaytime.playtime.toFixed(0) : "неизвестное количество"} часов\nПехота - суммарно ${squadMatesPlaytime.toFixed(0)} часов`
+      `Отряд №${leader.squadID}:\nСквадной ${leader.name} - ${leaderPlaytime !== TIME_IS_UNKNOWN ? leaderPlaytime.toFixed(0) : "неизвестное количество"} часов${squadMatesText}`,
+      repeat
     );
   }
 
+  /**
+   * Показать время бойца его сквадному
+   *
+   * @param {*} squadPlayer
+   * @returns
+   */
   async showPlaytimeToSquadLeader(squadPlayer) {
     let leader = this.server.players.find(
       (player) => player.isLeader && player.squadID === squadPlayer.squadID && player.teamID === squadPlayer.teamID
@@ -160,40 +198,40 @@ export default class FightersPlaytime extends BasePlugin {
     this.showPlaytimeOfPlayerToPlayer(squadPlayer, leader, true, 1);
   }
 
-  async showPlaytimeOfSquadLeader(squadPlayer) {
-    let leader = this.server.players.find(
-      (player) => player.isLeader && player.squadID === squadPlayer.squadID && player.teamID === squadPlayer.teamID
-    );
-
-    if (leader === undefined) {
-      return;
-    }
-
-    this.showPlaytimeOfPlayerToPlayer(leader, squadPlayer, true);
-  }
-
   async showPlaytimeOfAllSquadLeaders(squadPlayer) {
     let squadLeaders = this.server.players.filter((player) => player.isLeader && player.teamID === squadPlayer.teamID);
 
     for (const leader of squadLeaders) {
-      await this.showPlaytimeOfSquadToPlayer(leader, squadPlayer, true, 1);
+      await this.showPlaytimeOfSquadToPlayer(leader, squadPlayer, 1);
       await new Promise((resolve) => setTimeout(resolve, 2 * 1000));
     }
   }
 
+  /**
+   * Показывает игроку время определенного сквада
+   *
+   * @param {*} squadPlayer
+   * @param {number} squadID
+   * @returns
+   */
   async showPlaytimeOfSpecificSquadLeader(squadPlayer, squadID) {
     let squadLeader = this.server.players.find(
       (player) => player.isLeader && player.teamID === squadPlayer.teamID && player.squadID === squadID
     );
 
     if (!squadLeader) {
-      await this.warn(squadPlayer.steamID, "Сквадной с таким номером не найден");
+      await this.warn(squadPlayer.steamID, "Сквад с таким номером не найден");
       return;
     }
 
-    await this.showPlaytimeOfSquadToPlayer(squadLeader, squadPlayer, true, 2);
+    await this.showPlaytimeOfSquadToPlayer(squadLeader, squadPlayer, 1);
   }
 
+  /**
+   * Показывает игроку время бойцов его отряда
+   *
+   * @param {*} squadPlayer
+   */
   async showPlaytimeOfSquadmates(squadPlayer) {
     let squadMates = this.server.players.filter(
       (player) => player.teamID === squadPlayer.teamID && player.squadID === squadPlayer.squadID
@@ -202,6 +240,73 @@ export default class FightersPlaytime extends BasePlugin {
     for (const squadMate of squadMates) {
       await this.showPlaytimeOfPlayerToPlayer(squadMate, squadPlayer, true, 1);
       await new Promise((resolve) => setTimeout(resolve, 2 * 1000));
+    }
+  }
+
+  /**
+   * Получение времени определенного игрока
+   *
+   * @param {string} steamID
+   * @param {*} isNeedUpdate
+   * @returns
+   */
+  async getPlayerPlaytime(steamID, isNeedUpdate = false) {
+    let playtime;
+    try {
+      playtime = await this.playtimeAPI.requestPlaytimeBySteamID(steamID, isNeedUpdate);
+    } catch (error) {
+      this.verbose(1, `Failed to get playtime for ${steamID} with error: ${error}`);
+      return TIME_IS_UNKNOWN;
+    }
+
+    if (playtime.bmPlaytime || playtime.steamPlaytime) {
+      return Math.max(playtime.bmPlaytime, playtime.steamPlaytime) / 60 / 60;
+    }
+
+    return TIME_IS_UNKNOWN;
+  }
+
+  /**
+   *
+   * @param {Array<string>} steamIDs
+   * @param {boolean} isNeedUpdate
+   */
+  async getPlayersTotalPlaytime(steamIDs, isNeedUpdate = false) {
+    if (steamIDs.length === 0) {
+      this.verbose("WARNING: steamIDs length in getPlayersTotalPlaytime === 0");
+      return TIME_IS_UNKNOWN;
+    }
+
+    let playtimes = await this.getPlayersPlaytimes(steamIDs, isNeedUpdate);
+
+    if (playtimes === null) {
+      return TIME_IS_UNKNOWN;
+    }
+
+    let totalPlaytime = 0;
+    for (const playtime of playtimes) {
+      totalPlaytime += Math.max(playtime.bmPlaytime || playtime.steamPlaytime) / 60 / 60;
+    }
+
+    return totalPlaytime;
+  }
+
+  /**
+   *
+   * @param {Array<string>} steamIDs
+   * @param {boolean} isNeedUpdate
+   */
+  async getPlayersPlaytimes(steamIDs, isNeedUpdate = false) {
+    if (steamIDs.length === 0) {
+      this.verbose("WARNING: steamIDs length in getPlayersPlaytimes === 0");
+      return TIME_IS_UNKNOWN;
+    }
+
+    try {
+      return await this.playtimeAPI.requestPlaytimesBySteamIDs(steamIDs, isNeedUpdate);
+    } catch (error) {
+      this.verbose(1, `Failed to get playtimes for ${steamIDs.length} steam ids with error: ${error}`);
+      return TIME_IS_UNKNOWN;
     }
   }
 
@@ -214,5 +319,9 @@ export default class FightersPlaytime extends BasePlugin {
         await new Promise((resolve) => setTimeout(resolve, frequency * 1000));
       }
     }
+  }
+
+  getSecondsFromLastMatch() {
+    return (Date.now() - this.lastGameDate) / 1000;
   }
 }
